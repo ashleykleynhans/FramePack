@@ -1,6 +1,7 @@
 from diffusers_helper.hf_login import login
 
 import os
+import time
 
 os.environ['HF_HOME'] = os.path.abspath(os.path.realpath(os.path.join(os.path.dirname(__file__), './hf_download')))
 
@@ -101,6 +102,9 @@ os.makedirs(outputs_folder, exist_ok=True)
 
 @torch.no_grad()
 def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
+    # Start timer
+    start_time = time.time()
+
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
@@ -234,7 +238,8 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 current_step = d['i'] + 1
                 percentage = int(100.0 * current_step / steps)
                 hint = f'Sampling {current_step}/{steps}'
-                desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). The video is being extended now ...'
+                elapsed_time = time.time() - start_time
+                desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). Time elapsed: {elapsed_time:.2f}s. The video is being extended now ...'
                 stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
                 return
 
@@ -299,10 +304,25 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
             print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
+            # Calculate elapsed time for this checkpoint
+            elapsed_time = time.time() - start_time
+            print(f'Time elapsed: {elapsed_time:.2f} seconds')
+
             stream.output_queue.push(('file', output_filename))
 
             if is_last_section:
                 break
+
+        # End of generation - calculate and display the final time
+        total_time = time.time() - start_time
+        final_frames = int(max(0, total_generated_latent_frames * 4 - 3))
+        final_seconds = max(0, (total_generated_latent_frames * 4 - 3) / 30)
+
+        # Add final timing info
+        time_info = f"Generation completed in {total_time:.2f} seconds for {final_frames} frames ({final_seconds:.2f} seconds of video)"
+        print(time_info)
+        stream.output_queue.push(('time_info', time_info))
+
     except:
         traceback.print_exc()
 
@@ -319,27 +339,32 @@ def process(input_image, prompt, n_prompt, seed, total_second_length, latent_win
     global stream
     assert input_image is not None, 'No input image!'
 
-    yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+    yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True), ''
 
     stream = AsyncStream()
 
     async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf)
 
     output_filename = None
+    time_info = ''
 
     while True:
         flag, data = stream.output_queue.next()
 
         if flag == 'file':
             output_filename = data
-            yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+            yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True), time_info
 
         if flag == 'progress':
             preview, desc, html = data
-            yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+            yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True), time_info
+
+        if flag == 'time_info':
+            time_info = data
+            yield gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), time_info
 
         if flag == 'end':
-            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False), time_info
             break
 
 
@@ -393,11 +418,12 @@ with block:
             gr.Markdown('Note that the ending actions will be generated before the starting actions due to the inverted sampling. If the starting action is not in the video, you just need to wait, and it will be generated later.')
             progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
             progress_bar = gr.HTML('', elem_classes='no-generating-animation')
+            time_info = gr.Markdown('', elem_classes='no-generating-animation')
 
     gr.HTML('<div style="text-align:center; margin-top:20px;">Share your results and find ideas at the <a href="https://x.com/search?q=framepack&f=live" target="_blank">FramePack Twitter (X) thread</a></div>')
 
     ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf]
-    start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
+    start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button, time_info])
     end_button.click(fn=end_process)
 
 
